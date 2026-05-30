@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CANON SPECTRAL LENS – MVP Arcade</title>
+    <style>
+        body {
+            margin: 0;
+            background: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: 'Arial', sans-serif;
+        }
+        #cabinet {
+            background: #111;
+            border: 15px solid #2a2a2a;
+            border-radius: 15px;
+            box-shadow: 0 0 40px #000;
+        }
+        canvas {
+            display: block;
+            cursor: none;
+        }
+        #footer {
+            color: #888;
+            text-align: center;
+            font-size: 13px;
+            margin-top: 6px;
+            letter-spacing: 1px;
+        }
+        .key { color: #ff3333; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div id="cabinet">
+        <canvas id="game" width="800" height="600"></canvas>
+        <div id="footer">
+            <span class="key">Numpad 8·2·4·6·7·9·1·3</span> = AIM &nbsp;&nbsp;
+            <span class="key">Numpad 5</span> = RECORD &nbsp;&nbsp;
+            <span style="color:#aaa">CANON SPECTRAL LENS — MVP v1.0</span>
+        </div>
+    </div>
+
+    <script>
+        // ========== CANON SPECTRAL LENS – ARCADE MVP ==========
+        const canvas = document.getElementById('game');
+        const ctx = canvas.getContext('2d');
+
+        // ---------- GAME STATE ----------
+        const game = {
+            score: 0,
+            battery: 100,          // 0–100
+            tape: 45,              // seconds of MiniDV
+            sanity: 100,           // 0–100
+            recording: false,
+            over: false,
+            reason: '',
+            crosshair: { x: 400, y: 300 },
+            ghost: null,
+            spawnTimer: 0,
+            lastTime: 0,
+        };
+
+        // ---------- BRANDING RESOURCES ----------
+        const canonRed = '#CC0000';
+        const canonDarkRed = '#990000';
+        const canonGrey = '#C0C0C0';
+        const canonBlack = '#1A1A1A';
+
+        // ---------- KEYBOARD INPUT (NUMPAD) ----------
+        const keys = {};
+        window.addEventListener('keydown', e => {
+            keys[e.code] = true;
+            e.preventDefault();
+        });
+        window.addEventListener('keyup', e => {
+            keys[e.code] = false;
+            e.preventDefault();
+        });
+
+        function isDown(code) { return !!keys[code]; }
+
+        // 8‑way crosshair velocity (pixels/sec)
+        function getCrosshairVelocity() {
+            let dx = 0, dy = 0;
+            const speed = 320;
+            if (isDown('Numpad8') || isDown('Digit8')) dy -= 1;
+            if (isDown('Numpad2') || isDown('Digit2')) dy += 1;
+            if (isDown('Numpad4') || isDown('Digit4')) dx -= 1;
+            if (isDown('Numpad6') || isDown('Digit6')) dx += 1;
+            if (isDown('Numpad7') || isDown('Digit7')) { dx -= 1; dy -= 1; }
+            if (isDown('Numpad9') || isDown('Digit9')) { dx += 1; dy -= 1; }
+            if (isDown('Numpad1') || isDown('Digit1')) { dx -= 1; dy += 1; }
+            if (isDown('Numpad3') || isDown('Digit3')) { dx += 1; dy += 1; }
+            if (dx !== 0 || dy !== 0) {
+                const n = Math.sqrt(dx*dx + dy*dy);
+                dx /= n; dy /= n;
+            }
+            return { x: dx * speed, y: dy * speed };
+        }
+
+        // ---------- GHOST SYSTEM ----------
+        function spawnGhost() {
+            const m = 120;
+            game.ghost = {
+                x: m + Math.random() * (800 - 2*m),
+                y: m + Math.random() * (600 - 2*m),
+                size: 25,
+                maxSize: 110,
+                ecto: 0,
+                alive: true,
+                phase: Math.random() * Math.PI * 2,
+                phaseSpeed: 0.5 + Math.random() * 1.5,
+                driftBase: 20 + Math.random() * 50,
+            };
+            game.spawnTimer = 1.5;
+        }
+
+        function updateGhost(dt) {
+            const g = game.ghost;
+            if (!g || !g.alive) return;
+            // Erratic drift
+            g.phase += g.phaseSpeed * dt;
+            g.x += Math.cos(g.phase) * g.driftBase * dt;
+            g.y += Math.sin(g.phase * 0.7) * g.driftBase * 0.8 * dt;
+            // Keep inside play area
+            g.x = Math.min(800-60, Math.max(60, g.x));
+            g.y = Math.min(600-60, Math.max(60, g.y));
+            // Grow (approaches camera)
+            g.size += 6.5 * dt;
+            if (g.size >= g.maxSize) {
+                game.sanity -= 35 * dt;
+                if (game.sanity <= 0) { game.sanity = 0; end('Sanity shattered'); }
+            }
+            if (g.size > g.maxSize * 0.75) game.sanity -= 8 * dt;
+            if (game.sanity <= 0) end('You lost your mind');
+        }
+
+        // ---------- CAPTURE LOGIC ----------
+        function updateRecording(dt) {
+            const rec = isDown('Numpad5') || isDown('Digit5');
+            game.recording = rec && game.tape > 0 && game.battery > 0 && !game.over;
+            if (game.recording && game.ghost && game.ghost.alive) {
+                const g = game.ghost;
+                const dx = game.crosshair.x - g.x;
+                const dy = game.crosshair.y - g.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                if (dist < g.size * 0.55) {
+                    g.ecto += 45 * dt;
+                    if (g.ecto >= 100) capture();
+                }
+            }
+        }
+
+        function capture() {
+            const g = game.ghost;
+            const bonus = Math.floor((g.size / g.maxSize) * 200);
+            game.score += 100 + bonus;
+            g.alive = false;
+            game.ghost = null;
+            game.spawnTimer = 0.6;
+        }
+
+        // ---------- RESOURCES ----------
+        function updateResources(dt) {
+            if (game.over) return;
+            // Battery
+            const batDrain = 2.5 + (game.recording ? 7.0 : 0);
+            game.battery = Math.max(0, game.battery - batDrain * dt);
+            if (game.battery === 0) end('Battery empty');
+            // Tape
+            if (game.recording) {
+                game.tape -= dt;
+                if (game.tape <= 0) { game.tape = 0; game.recording = false; /* no rewind in MVP */ }
+            }
+            // Sanity regen (idle)
+            if (!game.recording && game.sanity < 100)
+                game.sanity = Math.min(100, game.sanity + 2 * dt);
+        }
+
+        function end(reason) {
+            game.over = true;
+            game.reason = reason;
+            game.recording = false;
+        }
+
+        // ---------- CROSSHAIR UPDATE ----------
+        function updateCrosshair(dt) {
+            const v = getCrosshairVelocity();
+            game.crosshair.x = Math.min(790, Math.max(10, game.crosshair.x + v.x * dt));
+            game.crosshair.y = Math.min(590, Math.max(10, game.crosshair.y + v.y * dt));
+        }
+
+        // ---------- RENDERING (CANON BRANDED) ----------
+        function drawCanonViewfinder() {
+            // Outer frame
+            ctx.save();
+            // Simulate a Canon viewfinder: dark edges, red ring at corner, Canon logo.
+            // Darken edges to create vignette
+            const grad = ctx.createRadialGradient(400,300,250, 400,300,500);
+            grad.addColorStop(0,'rgba(0,0,0,0)');
+            grad.addColorStop(1,'rgba(0,0,0,0.6)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0,0,800,600);
+
+            // Red recording frame border (when recording)
+            if (game.recording) {
+                ctx.strokeStyle = canonRed;
+                ctx.lineWidth = 4;
+                ctx.strokeRect(4,4,792,592);
+            }
+            ctx.restore();
+        }
+
+        function drawBackground() {
+            // Dark manor scene (minimalist)
+            ctx.fillStyle = '#1c130e';
+            ctx.fillRect(0,0,800,600);
+            // Floor
+            ctx.fillStyle = '#2b1f16';
+            ctx.fillRect(0,380,800,220);
+            // Wall detail
+            ctx.strokeStyle = '#3a2b1f';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(0,380); ctx.lineTo(800,380);
+            ctx.stroke();
+            // Door frame
+            ctx.strokeStyle = '#4d3a28';
+            ctx.strokeRect(280,90,240,290);
+            // Chandelier
+            ctx.fillStyle = '#4d3a28';
+            ctx.beginPath(); ctx.arc(400,70,50,0,Math.PI*2); ctx.fill();
+        }
+
+        function drawGhost() {
+            const g = game.ghost;
+            if (!g || !g.alive) return;
+            ctx.save(); ctx.translate(g.x, g.y);
+            // Body
+            const rad = ctx.createRadialGradient(0,0,g.size*0.2, 0,0,g.size);
+            rad.addColorStop(0,'rgba(230,230,255,0.95)');
+            rad.addColorStop(0.6,'rgba(170,190,230,0.5)');
+            rad.addColorStop(1,'rgba(80,100,160,0)');
+            ctx.fillStyle = rad;
+            ctx.beginPath(); ctx.ellipse(0,0,g.size,g.size*0.8,0,0,Math.PI*2); ctx.fill();
+            // Eyes
+            const ex = g.size*0.35, ey = g.size*0.25, er = g.size*0.13;
+            ctx.fillStyle = '#111';
+            ctx.beginPath(); ctx.arc(-ex,-ey,er,0,Math.PI*2); ctx.arc(ex,-ey,er,0,Math.PI*2); ctx.fill();
+            // Ecto bar
+            const bw = g.size*1.4, bh = 6, by = -g.size*0.7-10;
+            ctx.fillStyle = '#333';
+            ctx.fillRect(-bw/2, by, bw, bh);
+            ctx.fillStyle = canonRed;
+            ctx.fillRect(-bw/2, by, bw * (g.ecto/100), bh);
+            ctx.strokeStyle = '#fff'; ctx.lineWidth=1; ctx.strokeRect(-bw/2, by, bw, bh);
+            ctx.restore();
+        }
+
+        function drawCrosshair() {
+            const x = game.crosshair.x, y = game.crosshair.y;
+            // Canon-style focus brackets (like EOS)
+            ctx.strokeStyle = game.recording ? canonRed : '#00cc44';
+            ctx.lineWidth = 2;
+            const size = 18;
+            ctx.beginPath();
+            ctx.moveTo(x-size, y-size/2); ctx.lineTo(x-size, y-size/2+10);
+            ctx.moveTo(x-size, y-size/2); ctx.lineTo(x-size+10, y-size/2);
+            ctx.moveTo(x+size, y-size/2); ctx.lineTo(x+size, y-size/2+10);
+            ctx.moveTo(x+size, y-size/2); ctx.lineTo(x+size-10, y-size/2);
+            ctx.moveTo(x-size, y+size/2); ctx.lineTo(x-size, y+size/2-10);
+            ctx.moveTo(x-size, y+size/2); ctx.lineTo(x-size+10, y+size/2);
+            ctx.moveTo(x+size, y+size/2); ctx.lineTo(x+size, y+size/2-10);
+            ctx.moveTo(x+size, y+size/2); ctx.lineTo(x+size-10, y+size/2);
+            ctx.stroke();
+            // Red ring around center (recording indicator)
+            if (game.recording) {
+                ctx.strokeStyle = canonRed;
+                ctx.lineWidth = 2;
+                ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI*2); ctx.stroke();
+            }
+            ctx.fillStyle = game.recording ? canonRed : '#fff';
+            ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI*2); ctx.fill();
+        }
+
+        function drawHUD() {
+            // Canon logo (top left)
+            ctx.fillStyle = canonRed;
+            ctx.font = 'bold 22px "Arial", sans-serif';
+            ctx.fillText('Canon', 30, 45);
+            ctx.fillStyle = '#fff';
+            ctx.font = '11px "Arial"';
+            ctx.fillText('SPECTRAL LENS', 30, 60);
+
+            // Battery (Canon BP-945 style)
+            ctx.fillStyle = '#444';
+            ctx.fillRect(30, 75, 130, 16);
+            const bw = (game.battery/100)*130;
+            ctx.fillStyle = game.battery>25 ? '#2ecc71' : canonRed;
+            ctx.fillRect(30, 75, bw, 16);
+            ctx.strokeStyle = '#fff'; ctx.lineWidth=1; ctx.strokeRect(30,75,130,16);
+            ctx.fillStyle = '#fff'; ctx.font = '10px "Arial"';
+            ctx.fillText('BATT', 34, 87);
+
+            // Tape
+            const min = Math.floor(game.tape/60);
+            const sec = Math.floor(game.tape%60).toString().padStart(2,'0');
+            ctx.fillStyle = '#fff';
+            ctx.font = '14px "Courier New"';
+            ctx.fillText(`TAPE ${min}:${sec}`, 680, 55);
+            // Mini cassette icon
+            ctx.fillStyle = '#888';
+            ctx.fillRect(640,40,30,12);
+            ctx.fillStyle = '#fff'; ctx.font='8px monospace'; ctx.fillText('DV',648,50);
+
+            // REC dot
+            if (game.recording) {
+                ctx.fillStyle = canonRed;
+                ctx.beginPath(); ctx.arc(740, 45, 8, 0, Math.PI*2); ctx.fill();
+                ctx.fillStyle = '#fff'; ctx.font='bold 12px Arial'; ctx.fillText('REC',753,50);
+            }
+
+            // Sanity
+            ctx.fillStyle = '#444';
+            ctx.fillRect(30, 560, 130, 16);
+            const sw = (game.sanity/100)*130;
+            ctx.fillStyle = '#8e44ad';
+            ctx.fillRect(30, 560, sw, 16);
+            ctx.strokeStyle = '#fff'; ctx.strokeRect(30,560,130,16);
+            ctx.fillStyle = '#fff'; ctx.font = '10px Arial';
+            ctx.fillText('SANITY', 34, 572);
+
+            // Score
+            ctx.font = '15px "Courier New"';
+            ctx.fillText(`SCORE ${game.score}`, 680, 575);
+        }
+
+        function drawVHS() {
+            // Scanlines & noise
+            for (let i=0; i<600; i+=3) {
+                ctx.fillStyle = 'rgba(0,0,0,0.08)';
+                ctx.fillRect(0,i,800,1);
+            }
+            // Random white noise
+            for (let i=0; i<200; i++) {
+                const rx = Math.random()*800, ry = Math.random()*600;
+                ctx.fillStyle = `rgba(255,255,255,${Math.random()*0.03})`;
+                ctx.fillRect(rx, ry, 2, 2);
+            }
+        }
+
+        function drawGameOver() {
+            ctx.fillStyle = 'rgba(0,0,0,0.85)';
+            ctx.fillRect(0,0,800,600);
+            ctx.fillStyle = canonRed;
+            ctx.font = '45px "Arial"'; ctx.textAlign='center';
+            ctx.fillText('GAME OVER',400,250);
+            ctx.fillStyle = '#fff'; ctx.font='22px Arial';
+            ctx.fillText(game.reason,400,310);
+            ctx.fillText(`FINAL SCORE: ${game.score}`,400,360);
+            ctx.font = '16px Arial'; ctx.fillText('Press F5 to restart',400,420);
+            ctx.textAlign='left';
+        }
+
+        function render() {
+            drawBackground();
+            drawGhost();
+            drawCanonViewfinder();
+            drawCrosshair();
+            drawHUD();
+            drawVHS();
+            if (game.over) drawGameOver();
+        }
+
+        // ---------- GAME LOOP ----------
+        function loop(ts) {
+            if (!game.lastTime) game.lastTime = ts;
+            const dt = Math.min(0.1, (ts - game.lastTime)/1000);
+            game.lastTime = ts;
+
+            if (!game.over) {
+                updateResources(dt);
+                updateCrosshair(dt);
+                updateRecording(dt);
+                updateGhost(dt);
+                if (!game.ghost || !game.ghost.alive) {
+                    game.spawnTimer -= dt;
+                    if (game.spawnTimer <= 0) spawnGhost();
+                }
+            }
+            render();
+            requestAnimationFrame(loop);
+        }
+
+        // Start
+        spawnGhost();
+        requestAnimationFrame(loop);
+    </script>
+</body>
+</html>
