@@ -1,404 +1,580 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CANON SPECTRAL LENS – MVP Arcade</title>
-    <style>
-        body {
-            margin: 0;
-            background: #000;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            font-family: 'Arial', sans-serif;
-        }
-        #cabinet {
-            background: #111;
-            border: 15px solid #2a2a2a;
-            border-radius: 15px;
-            box-shadow: 0 0 40px #000;
-        }
-        canvas {
-            display: block;
-            cursor: none;
-        }
-        #footer {
-            color: #888;
-            text-align: center;
-            font-size: 13px;
-            margin-top: 6px;
-            letter-spacing: 1px;
-        }
-        .key { color: #ff3333; font-weight: bold; }
-    </style>
+<meta charset="UTF-8">
+<title>CANON SPECTRAL LENS – Arcade MVP</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;font-family:Arial,sans-serif;overflow:hidden}
+canvas{display:block;cursor:none;border:2px solid #333}
+#controls-footer{color:#aaa;font-size:12px;margin-top:8px;text-align:center;line-height:1.7}
+#controls-footer .key{color:#CC0000;font-weight:bold}
+</style>
 </head>
 <body>
-    <div id="cabinet">
-        <canvas id="game" width="800" height="600"></canvas>
-        <div id="footer">
-            <span class="key">Numpad 8·2·4·6·7·9·1·3</span> = AIM &nbsp;&nbsp;
-            <span class="key">Numpad 5</span> = RECORD &nbsp;&nbsp;
-            <span style="color:#aaa">CANON SPECTRAL LENS — MVP v1.0</span>
-        </div>
-    </div>
+<canvas id="gc" width="800" height="600"></canvas>
+<div id="controls-footer">
+  <span class="key">NUMPAD 8·2·4·6·7·9·1·3</span> = AIM &nbsp;|&nbsp;
+  <span class="key">5</span> = REC &nbsp;|&nbsp;
+  <span class="key">+/−</span> or <span class="key">T/W</span> = ZOOM &nbsp;|&nbsp;
+  <span class="key">0</span> = REWIND &nbsp;|&nbsp;
+  <span class="key">M</span> = MUTE
+</div>
+<script>
+(function(){
+"use strict";
+const W=800,H=600,CANON_RED="#CC0000";
+const canvas=document.getElementById("gc");
+const ctx=canvas.getContext("2d");
 
-    <script>
-        // ========== CANON SPECTRAL LENS – ARCADE MVP ==========
-        const canvas = document.getElementById('game');
-        const ctx = canvas.getContext('2d');
+let highScore=parseInt(localStorage.getItem("canonSpectralLensHighScore"))||0;
 
-        // ---------- GAME STATE ----------
-        const game = {
-            score: 0,
-            battery: 100,          // 0–100
-            tape: 45,              // seconds of MiniDV
-            sanity: 100,           // 0–100
-            recording: false,
-            over: false,
-            reason: '',
-            crosshair: { x: 400, y: 300 },
-            ghost: null,
-            spawnTimer: 0,
-            lastTime: 0,
-        };
+// ── Ghost Types ──
+const GHOST_TYPES=[
+  {name:"Shadow",  rarity:"Common",   color:"#ccc",    si:0, sizeMin:40, sizeMax:80,  speed:60,  sanMul:1.0, ptMul:1.0, weight:30},
+  {name:"Blob",    rarity:"Common",   color:"#ccc",    si:1, sizeMin:50, sizeMax:100, speed:40,  sanMul:1.2, ptMul:1.0, weight:25},
+  {name:"Firebat", rarity:"Uncommon", color:"#4fc3f7", si:2, sizeMin:30, sizeMax:60,  speed:100, sanMul:1.0, ptMul:1.5, weight:20},
+  {name:"Wraith",  rarity:"Uncommon", color:"#4fc3f7", si:3, sizeMin:45, sizeMax:90,  speed:70,  sanMul:1.3, ptMul:1.5, weight:15},
+  {name:"Orb",     rarity:"Rare",     color:"#ffd740", si:4, sizeMin:20, sizeMax:45,  speed:120, sanMul:0.8, ptMul:2.5, weight:8},
+  {name:"Demon",   rarity:"Legendary",color:"#ff1744", si:5, sizeMin:70, sizeMax:110, speed:50,  sanMul:2.0, ptMul:4.0, weight:3},
+];
+const TOTAL_WEIGHT=GHOST_TYPES.reduce((s,t)=>s+t.weight,0);
 
-        // ---------- BRANDING RESOURCES ----------
-        const canonRed = '#CC0000';
-        const canonDarkRed = '#990000';
-        const canonGrey = '#C0C0C0';
-        const canonBlack = '#1A1A1A';
+function pickGhostType(){
+  let r=Math.random()*TOTAL_WEIGHT;
+  for(const t of GHOST_TYPES){r-=t.weight;if(r<=0)return t;}
+  return GHOST_TYPES[0];
+}
 
-        // ---------- KEYBOARD INPUT (NUMPAD) ----------
-        const keys = {};
-        window.addEventListener('keydown', e => {
-            keys[e.code] = true;
-            e.preventDefault();
-        });
-        window.addEventListener('keyup', e => {
-            keys[e.code] = false;
-            e.preventDefault();
-        });
+// ── Assets ──
+const assets={bg:null,bgLoaded:false,ghosts:[],bgm:null,bgmStarted:false,bgmMuted:false};
 
-        function isDown(code) { return !!keys[code]; }
+function loadImage(src){
+  return new Promise(r=>{
+    const img=new Image();
+    img.onload=()=>r(img);
+    img.onerror=()=>r(null);
+    img.src=src;
+  });
+}
 
-        // 8‑way crosshair velocity (pixels/sec)
-        function getCrosshairVelocity() {
-            let dx = 0, dy = 0;
-            const speed = 320;
-            if (isDown('Numpad8') || isDown('Digit8')) dy -= 1;
-            if (isDown('Numpad2') || isDown('Digit2')) dy += 1;
-            if (isDown('Numpad4') || isDown('Digit4')) dx -= 1;
-            if (isDown('Numpad6') || isDown('Digit6')) dx += 1;
-            if (isDown('Numpad7') || isDown('Digit7')) { dx -= 1; dy -= 1; }
-            if (isDown('Numpad9') || isDown('Digit9')) { dx += 1; dy -= 1; }
-            if (isDown('Numpad1') || isDown('Digit1')) { dx -= 1; dy += 1; }
-            if (isDown('Numpad3') || isDown('Digit3')) { dx += 1; dy += 1; }
-            if (dx !== 0 || dy !== 0) {
-                const n = Math.sqrt(dx*dx + dy*dy);
-                dx /= n; dy /= n;
-            }
-            return { x: dx * speed, y: dy * speed };
-        }
+(async function(){
+  const bgP=loadImage("background.png").then(i=>{assets.bg=i;assets.bgLoaded=!!i;});
+  const gPs=[];
+  for(let i=1;i<=6;i++){
+    gPs.push(loadImage("ghost"+i+".png").then((img,idx)=>{assets.ghosts[i-1]=img;}).bind(null));
+  }
+  try{assets.bgm=new Audio("bgm.mp3");assets.bgm.loop=true;assets.bgm.volume=0.4;}catch(e){}
+  await Promise.all([bgP,...gPs]);
+})();
 
-        // ---------- GHOST SYSTEM ----------
-        function spawnGhost() {
-            const m = 120;
-            game.ghost = {
-                x: m + Math.random() * (800 - 2*m),
-                y: m + Math.random() * (600 - 2*m),
-                size: 25,
-                maxSize: 110,
-                ecto: 0,
-                alive: true,
-                phase: Math.random() * Math.PI * 2,
-                phaseSpeed: 0.5 + Math.random() * 1.5,
-                driftBase: 20 + Math.random() * 50,
-            };
-            game.spawnTimer = 1.5;
-        }
+function startBGM(){if(assets.bgmStarted||!assets.bgm)return;assets.bgmStarted=true;assets.bgm.play().catch(()=>{});}
+function toggleMute(){assets.bgmMuted=!assets.bgmMuted;if(assets.bgm)assets.bgm.muted=assets.bgmMuted;}
 
-        function updateGhost(dt) {
-            const g = game.ghost;
-            if (!g || !g.alive) return;
-            // Erratic drift
-            g.phase += g.phaseSpeed * dt;
-            g.x += Math.cos(g.phase) * g.driftBase * dt;
-            g.y += Math.sin(g.phase * 0.7) * g.driftBase * 0.8 * dt;
-            // Keep inside play area
-            g.x = Math.min(800-60, Math.max(60, g.x));
-            g.y = Math.min(600-60, Math.max(60, g.y));
-            // Grow (approaches camera)
-            g.size += 6.5 * dt;
-            if (g.size >= g.maxSize) {
-                game.sanity -= 35 * dt;
-                if (game.sanity <= 0) { game.sanity = 0; end('Sanity shattered'); }
-            }
-            if (g.size > g.maxSize * 0.75) game.sanity -= 8 * dt;
-            if (game.sanity <= 0) end('You lost your mind');
-        }
+// ── State ──
+let state="title";
+let blinkTimer=0,blinkOn=true;
 
-        // ---------- CAPTURE LOGIC ----------
-        function updateRecording(dt) {
-            const rec = isDown('Numpad5') || isDown('Digit5');
-            game.recording = rec && game.tape > 0 && game.battery > 0 && !game.over;
-            if (game.recording && game.ghost && game.ghost.alive) {
-                const g = game.ghost;
-                const dx = game.crosshair.x - g.x;
-                const dy = game.crosshair.y - g.y;
-                const dist = Math.sqrt(dx*dx + dy*dy);
-                if (dist < g.size * 0.55) {
-                    g.ecto += 45 * dt;
-                    if (g.ecto >= 100) capture();
-                }
-            }
-        }
+const cross={x:400,y:300,dx:0,dy:0,speed:320};
 
-        function capture() {
-            const g = game.ghost;
-            const bonus = Math.floor((g.size / g.maxSize) * 200);
-            game.score += 100 + bonus;
-            g.alive = false;
-            game.ghost = null;
-            game.spawnTimer = 0.6;
-        }
+const game={
+  score:0,battery:100,tape:45,tapeMax:45,sanity:100,
+  recording:false,rewinding:false,
+  zoom:1.0,
+  over:false,overReason:"",newHigh:false,
+  ghost:null,spawnTimer:0,ghostsCapt:0,
+  noiseTimer:0,noiseLines:[]
+};
 
-        // ---------- RESOURCES ----------
-        function updateResources(dt) {
-            if (game.over) return;
-            // Battery
-            const batDrain = 2.5 + (game.recording ? 7.0 : 0);
-            game.battery = Math.max(0, game.battery - batDrain * dt);
-            if (game.battery === 0) end('Battery empty');
-            // Tape
-            if (game.recording) {
-                game.tape -= dt;
-                if (game.tape <= 0) { game.tape = 0; game.recording = false; /* no rewind in MVP */ }
-            }
-            // Sanity regen (idle)
-            if (!game.recording && game.sanity < 100)
-                game.sanity = Math.min(100, game.sanity + 2 * dt);
-        }
+// ── Keys ──
+const keys={};
+let firstKeyPressed=false;
 
-        function end(reason) {
-            game.over = true;
-            game.reason = reason;
-            game.recording = false;
-        }
+function keyToDir(code){
+  const map={
+    Numpad8:[0,-1],Numpad2:[0,1],Numpad4:[-1,0],Numpad6:[1,0],
+    Numpad7:[-1,-1],Numpad9:[1,-1],Numpad1:[-1,1],Numpad3:[1,1],
+    Digit8:[0,-1],Digit2:[0,1],Digit4:[-1,0],Digit6:[1,0],
+    Digit7:[-1,-1],Digit9:[1,-1],Digit1:[-1,1],Digit3:[1,1]
+  };
+  return map[code]||null;
+}
 
-        // ---------- CROSSHAIR UPDATE ----------
-        function updateCrosshair(dt) {
-            const v = getCrosshairVelocity();
-            game.crosshair.x = Math.min(790, Math.max(10, game.crosshair.x + v.x * dt));
-            game.crosshair.y = Math.min(590, Math.max(10, game.crosshair.y + v.y * dt));
-        }
+const gameKeys=new Set([
+  "Numpad8","Numpad2","Numpad4","Numpad6","Numpad7","Numpad9","Numpad1","Numpad3","Numpad5",
+  "Digit8","Digit2","Digit4","Digit6","Digit7","Digit9","Digit1","Digit3","Digit5",
+  "NumpadAdd","NumpadSubtract","Numpad0","Digit0",
+  "KeyM","KeyW","KeyT"
+]);
 
-        // ---------- RENDERING (CANON BRANDED) ----------
-        function drawCanonViewfinder() {
-            // Outer frame
-            ctx.save();
-            // Simulate a Canon viewfinder: dark edges, red ring at corner, Canon logo.
-            // Darken edges to create vignette
-            const grad = ctx.createRadialGradient(400,300,250, 400,300,500);
-            grad.addColorStop(0,'rgba(0,0,0,0)');
-            grad.addColorStop(1,'rgba(0,0,0,0.6)');
-            ctx.fillStyle = grad;
-            ctx.fillRect(0,0,800,600);
+document.addEventListener("keydown",e=>{
+  if(gameKeys.has(e.code))e.preventDefault();
+  if(!firstKeyPressed){firstKeyPressed=true;startBGM();}
+  if(e.code==="KeyM"){toggleMute();return;}
+  if(state==="title"){
+    if(e.code==="Numpad5"||e.code==="Digit5")startGame();
+    return;
+  }
+  if(game.over)return;
+  keys[e.code]=true;
+  if(e.code==="Numpad5"||e.code==="Digit5")game.recording=true;
+  if(e.code==="Numpad0"||e.code==="Digit0")game.rewinding=true;
+  if(e.code==="NumpadAdd"||e.code==="KeyT")game.zoom=Math.min(4.0,game.zoom+0.5);
+  if(e.code==="NumpadSubtract"||e.code==="KeyW")game.zoom=Math.max(1.0,game.zoom-0.5);
+});
+document.addEventListener("keyup",e=>{
+  if(gameKeys.has(e.code))e.preventDefault();
+  keys[e.code]=false;
+  if(e.code==="Numpad5"||e.code==="Digit5")game.recording=false;
+  if(e.code==="Numpad0"||e.code==="Digit0")game.rewinding=false;
+});
 
-            // Red recording frame border (when recording)
-            if (game.recording) {
-                ctx.strokeStyle = canonRed;
-                ctx.lineWidth = 4;
-                ctx.strokeRect(4,4,792,592);
-            }
-            ctx.restore();
-        }
+// ── Start ──
+function startGame(){
+  state="game";
+  game.score=0;game.battery=100;game.tape=45;game.tapeMax=45;game.sanity=100;
+  game.recording=false;game.rewinding=false;game.zoom=1.0;
+  game.over=false;game.overReason="";game.newHigh=false;game.ghostsCapt=0;
+  cross.x=400;cross.y=300;
+  spawnGhost();
+  startBGM();
+}
 
-        function drawBackground() {
-            // Dark manor scene (minimalist)
-            ctx.fillStyle = '#1c130e';
-            ctx.fillRect(0,0,800,600);
-            // Floor
-            ctx.fillStyle = '#2b1f16';
-            ctx.fillRect(0,380,800,220);
-            // Wall detail
-            ctx.strokeStyle = '#3a2b1f';
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            ctx.moveTo(0,380); ctx.lineTo(800,380);
-            ctx.stroke();
-            // Door frame
-            ctx.strokeStyle = '#4d3a28';
-            ctx.strokeRect(280,90,240,290);
-            // Chandelier
-            ctx.fillStyle = '#4d3a28';
-            ctx.beginPath(); ctx.arc(400,70,50,0,Math.PI*2); ctx.fill();
-        }
+// ── Ghost Spawn ──
+function spawnGhost(){
+  const type=pickGhostType();
+  const margin=0.2;
+  const x=W*margin+Math.random()*W*(1-2*margin);
+  const y=H*margin+Math.random()*H*(1-2*margin);
+  const size=type.sizeMin+Math.random()*(type.sizeMax-type.sizeMin);
+  const sprite=assets.ghosts[type.si]||null;
+  game.ghost={
+    x,y,size,maxSize:type.sizeMax,
+    ecto:0,alive:true,
+    type,sprite,
+    driftX:(Math.random()-0.5)*type.speed,
+    driftY:(Math.random()-0.5)*type.speed,
+    driftTimer:0,
+    alpha:0.7+Math.random()*0.3,
+    bobPhase:Math.random()*Math.PI*2
+  };
+  game.spawnTimer=1.2+Math.random()*1.5;
+}
 
-        function drawGhost() {
-            const g = game.ghost;
-            if (!g || !g.alive) return;
-            ctx.save(); ctx.translate(g.x, g.y);
-            // Body
-            const rad = ctx.createRadialGradient(0,0,g.size*0.2, 0,0,g.size);
-            rad.addColorStop(0,'rgba(230,230,255,0.95)');
-            rad.addColorStop(0.6,'rgba(170,190,230,0.5)');
-            rad.addColorStop(1,'rgba(80,100,160,0)');
-            ctx.fillStyle = rad;
-            ctx.beginPath(); ctx.ellipse(0,0,g.size,g.size*0.8,0,0,Math.PI*2); ctx.fill();
-            // Eyes
-            const ex = g.size*0.35, ey = g.size*0.25, er = g.size*0.13;
-            ctx.fillStyle = '#111';
-            ctx.beginPath(); ctx.arc(-ex,-ey,er,0,Math.PI*2); ctx.arc(ex,-ey,er,0,Math.PI*2); ctx.fill();
-            // Ecto bar
-            const bw = g.size*1.4, bh = 6, by = -g.size*0.7-10;
-            ctx.fillStyle = '#333';
-            ctx.fillRect(-bw/2, by, bw, bh);
-            ctx.fillStyle = canonRed;
-            ctx.fillRect(-bw/2, by, bw * (g.ecto/100), bh);
-            ctx.strokeStyle = '#fff'; ctx.lineWidth=1; ctx.strokeRect(-bw/2, by, bw, bh);
-            ctx.restore();
-        }
+// ── World-to-Screen ──
+function worldToScreen(wx,wy){
+  return[W/2+(wx-W/2)*game.zoom, H/2+(wy-H/2)*game.zoom];
+}
 
-        function drawCrosshair() {
-            const x = game.crosshair.x, y = game.crosshair.y;
-            // Canon-style focus brackets (like EOS)
-            ctx.strokeStyle = game.recording ? canonRed : '#00cc44';
-            ctx.lineWidth = 2;
-            const size = 18;
-            ctx.beginPath();
-            ctx.moveTo(x-size, y-size/2); ctx.lineTo(x-size, y-size/2+10);
-            ctx.moveTo(x-size, y-size/2); ctx.lineTo(x-size+10, y-size/2);
-            ctx.moveTo(x+size, y-size/2); ctx.lineTo(x+size, y-size/2+10);
-            ctx.moveTo(x+size, y-size/2); ctx.lineTo(x+size-10, y-size/2);
-            ctx.moveTo(x-size, y+size/2); ctx.lineTo(x-size, y+size/2-10);
-            ctx.moveTo(x-size, y+size/2); ctx.lineTo(x-size+10, y+size/2);
-            ctx.moveTo(x+size, y+size/2); ctx.lineTo(x+size, y+size/2-10);
-            ctx.moveTo(x+size, y+size/2); ctx.lineTo(x+size-10, y+size/2);
-            ctx.stroke();
-            // Red ring around center (recording indicator)
-            if (game.recording) {
-                ctx.strokeStyle = canonRed;
-                ctx.lineWidth = 2;
-                ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI*2); ctx.stroke();
-            }
-            ctx.fillStyle = game.recording ? canonRed : '#fff';
-            ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI*2); ctx.fill();
-        }
+// ── Update ──
+function update(dt){
+  if(state==="title"){
+    blinkTimer+=dt;
+    if(blinkTimer>=0.5){blinkTimer-=0.5;blinkOn=!blinkOn;}
+    return;
+  }
+  if(game.over)return;
 
-        function drawHUD() {
-            // Canon logo (top left)
-            ctx.fillStyle = canonRed;
-            ctx.font = 'bold 22px "Arial", sans-serif';
-            ctx.fillText('Canon', 30, 45);
-            ctx.fillStyle = '#fff';
-            ctx.font = '11px "Arial"';
-            ctx.fillText('SPECTRAL LENS', 30, 60);
+  // Can't record while rewinding
+  if(game.rewinding)game.recording=false;
 
-            // Battery (Canon BP-945 style)
-            ctx.fillStyle = '#444';
-            ctx.fillRect(30, 75, 130, 16);
-            const bw = (game.battery/100)*130;
-            ctx.fillStyle = game.battery>25 ? '#2ecc71' : canonRed;
-            ctx.fillRect(30, 75, bw, 16);
-            ctx.strokeStyle = '#fff'; ctx.lineWidth=1; ctx.strokeRect(30,75,130,16);
-            ctx.fillStyle = '#fff'; ctx.font = '10px "Arial"';
-            ctx.fillText('BATT', 34, 87);
+  if(game.spawnTimer>0){game.spawnTimer-=dt;if(game.spawnTimer<0)game.spawnTimer=0;}
 
-            // Tape
-            const min = Math.floor(game.tape/60);
-            const sec = Math.floor(game.tape%60).toString().padStart(2,'0');
-            ctx.fillStyle = '#fff';
-            ctx.font = '14px "Courier New"';
-            ctx.fillText(`TAPE ${min}:${sec}`, 680, 55);
-            // Mini cassette icon
-            ctx.fillStyle = '#888';
-            ctx.fillRect(640,40,30,12);
-            ctx.fillStyle = '#fff'; ctx.font='8px monospace'; ctx.fillText('DV',648,50);
+  // Crosshair
+  cross.dx=0;cross.dy=0;
+  const dirCodes=["Numpad8","Numpad2","Numpad4","Numpad6","Numpad7","Numpad9","Numpad1","Numpad3",
+                  "Digit8","Digit2","Digit4","Digit6","Digit7","Digit9","Digit1","Digit3"];
+  for(const c of dirCodes){
+    if(keys[c]){const d=keyToDir(c);if(d){cross.dx+=d[0];cross.dy+=d[1];}}
+  }
+  const mag=Math.sqrt(cross.dx*cross.dx+cross.dy*cross.dy);
+  if(mag>0){cross.dx/=mag;cross.dy/=mag;}
+  cross.x+=cross.dx*cross.speed*dt;
+  cross.y+=cross.dy*cross.speed*dt;
+  cross.x=Math.max(10,Math.min(W-10,cross.x));
+  cross.y=Math.max(10,Math.min(H-10,cross.y));
 
-            // REC dot
-            if (game.recording) {
-                ctx.fillStyle = canonRed;
-                ctx.beginPath(); ctx.arc(740, 45, 8, 0, Math.PI*2); ctx.fill();
-                ctx.fillStyle = '#fff'; ctx.font='bold 12px Arial'; ctx.fillText('REC',753,50);
-            }
+  // Battery
+  let drain=2.5;
+  if(game.recording)drain+=7.0*(1+(game.zoom-1)*0.4);
+  game.battery-=drain*dt;
+  if(game.battery<=0){game.battery=0;gameOver("Battery empty");return;}
 
-            // Sanity
-            ctx.fillStyle = '#444';
-            ctx.fillRect(30, 560, 130, 16);
-            const sw = (game.sanity/100)*130;
-            ctx.fillStyle = '#8e44ad';
-            ctx.fillRect(30, 560, sw, 16);
-            ctx.strokeStyle = '#fff'; ctx.strokeRect(30,560,130,16);
-            ctx.fillStyle = '#fff'; ctx.font = '10px Arial';
-            ctx.fillText('SANITY', 34, 572);
+  // Tape
+  if(game.recording){
+    game.tape-=dt;
+    if(game.tape<=0){game.tape=0;game.recording=false;}
+  }
+  // Rewind: recover tape, vulnerable
+  if(game.rewinding&&game.tape<game.tapeMax){
+    game.tape=Math.min(game.tapeMax,game.tape+0.7*dt);
+  }
 
-            // Score
-            ctx.font = '15px "Courier New"';
-            ctx.fillText(`SCORE ${game.score}`, 680, 575);
-        }
+  // Ghost
+  const g=game.ghost;
+  if(g&&g.alive&&game.spawnTimer<=0){
+    g.driftTimer-=dt;
+    if(g.driftTimer<=0){
+      g.driftX=(Math.random()-0.5)*g.type.speed;
+      g.driftY=(Math.random()-0.5)*g.type.speed;
+      g.driftTimer=0.6+Math.random()*1.2;
+    }
+    g.x+=g.driftX*dt;
+    g.y+=g.driftY*dt;
+    g.x=Math.max(50,Math.min(W-50,g.x));
+    g.y=Math.max(50,Math.min(H-50,g.y));
+    g.bobPhase+=dt*2.5;
 
-        function drawVHS() {
-            // Scanlines & noise
-            for (let i=0; i<600; i+=3) {
-                ctx.fillStyle = 'rgba(0,0,0,0.08)';
-                ctx.fillRect(0,i,800,1);
-            }
-            // Random white noise
-            for (let i=0; i<200; i++) {
-                const rx = Math.random()*800, ry = Math.random()*600;
-                ctx.fillStyle = `rgba(255,255,255,${Math.random()*0.03})`;
-                ctx.fillRect(rx, ry, 2, 2);
-            }
-        }
+    // Screen positions for distance check
+    const[gsx,gsy]=worldToScreen(g.x,g.y+Math.sin(g.bobPhase)*6);
+    const dist=Math.sqrt((cross.x-gsx)**2+(cross.y-gsy)**2);
+    const screenSize=g.size*game.zoom;
 
-        function drawGameOver() {
-            ctx.fillStyle = 'rgba(0,0,0,0.85)';
-            ctx.fillRect(0,0,800,600);
-            ctx.fillStyle = canonRed;
-            ctx.font = '45px "Arial"'; ctx.textAlign='center';
-            ctx.fillText('GAME OVER',400,250);
-            ctx.fillStyle = '#fff'; ctx.font='22px Arial';
-            ctx.fillText(game.reason,400,310);
-            ctx.fillText(`FINAL SCORE: ${game.score}`,400,360);
-            ctx.font = '16px Arial'; ctx.fillText('Press F5 to restart',400,420);
-            ctx.textAlign='left';
-        }
+    // Sanity drain (world proximity)
+    const worldDist=Math.sqrt((cross.x-g.x)**2+(cross.y-g.y)**2);
+    if(worldDist<200){
+      const factor=1-(worldDist/200);
+      game.sanity-=factor*12*g.type.sanMul*dt;
+    }
 
-        function render() {
-            drawBackground();
-            drawGhost();
-            drawCanonViewfinder();
-            drawCrosshair();
-            drawHUD();
-            drawVHS();
-            if (game.over) drawGameOver();
-        }
+    // Capture (screen proximity, zoom affects ecto rate)
+    if(game.recording&&dist<screenSize*0.55){
+      g.ecto+=45*game.zoom*dt;
+      if(g.ecto>=100){
+        g.alive=false;
+        const base=100+Math.floor((g.size/g.maxSize)*200);
+        game.score+=Math.floor(base*g.type.ptMul*game.zoom);
+        game.ghostsCapt++;
+        setTimeout(()=>spawnGhost(),100);
+      }
+    }
+  }
 
-        // ---------- GAME LOOP ----------
-        function loop(ts) {
-            if (!game.lastTime) game.lastTime = ts;
-            const dt = Math.min(0.1, (ts - game.lastTime)/1000);
-            game.lastTime = ts;
+  // Sanity: regen only when not recording and not rewinding
+  if(game.rewinding){
+    game.sanity-=5*dt;
+  } else if(!game.recording){
+    game.sanity=Math.min(100,game.sanity+2*dt);
+  }
+  if(game.sanity<=0){game.sanity=0;gameOver("Sanity shattered");return;}
 
-            if (!game.over) {
-                updateResources(dt);
-                updateCrosshair(dt);
-                updateRecording(dt);
-                updateGhost(dt);
-                if (!game.ghost || !game.ghost.alive) {
-                    game.spawnTimer -= dt;
-                    if (game.spawnTimer <= 0) spawnGhost();
-                }
-            }
-            render();
-            requestAnimationFrame(loop);
-        }
+  // VHS noise
+  game.noiseTimer-=dt;
+  if(game.noiseTimer<=0){
+    game.noiseTimer=0.05;
+    game.noiseLines=[];
+    for(let i=0;i<3;i++){
+      if(Math.random()<0.3)
+        game.noiseLines.push({y:Math.random()*H,h:1+Math.random()*3,a:0.03+Math.random()*0.07});
+    }
+  }
+}
 
-        // Start
-        spawnGhost();
-        requestAnimationFrame(loop);
-    </script>
+function gameOver(reason){
+  game.over=true;game.overReason=reason;game.recording=false;game.rewinding=false;
+  if(game.score>highScore){
+    highScore=game.score;
+    localStorage.setItem("canonSpectralLensHighScore",highScore);
+    game.newHigh=true;
+  }
+}
+
+// ── Draw ──
+function drawBG(){
+  if(assets.bgLoaded&&assets.bg){
+    ctx.drawImage(assets.bg,0,0,W,H);
+  } else {
+    ctx.fillStyle="#1a0a0a";ctx.fillRect(0,0,W,H);
+    ctx.strokeStyle="#2a1515";ctx.lineWidth=2;
+    ctx.strokeRect(60,80,W-120,H-160);
+    ctx.strokeRect(100,100,200,180);ctx.strokeRect(500,100,200,180);
+    ctx.fillStyle="#0d0505";ctx.fillRect(330,250,140,H-250);
+    ctx.strokeStyle="#2a1515";ctx.strokeRect(330,250,140,H-250);
+    ctx.fillStyle="#1f0f0f";ctx.fillRect(100,100,200,180);ctx.fillRect(500,100,200,180);
+  }
+}
+
+function drawTitleScreen(){
+  if(assets.bgLoaded&&assets.bg){
+    ctx.globalAlpha=0.4;ctx.drawImage(assets.bg,0,0,W,H);ctx.globalAlpha=1;
+  }
+  ctx.fillStyle="rgba(0,0,0,0.55)";ctx.fillRect(0,0,W,H);
+
+  ctx.strokeStyle=CANON_RED;ctx.lineWidth=3;
+  ctx.beginPath();ctx.arc(400,185,195,0,Math.PI*2);ctx.stroke();
+  ctx.strokeStyle="rgba(204,0,0,0.3)";ctx.lineWidth=1.5;
+  ctx.beginPath();ctx.arc(400,185,180,0,Math.PI*2);ctx.stroke();
+
+  ctx.textAlign="center";ctx.textBaseline="middle";
+  ctx.font="bold 36px Arial";ctx.fillStyle=CANON_RED;
+  ctx.fillText("CANON SPECTRAL LENS",400,165);
+  ctx.font="italic 15px Arial";ctx.fillStyle="#fff";
+  ctx.fillText("Through the lens, the unseen becomes eternal",400,205);
+  ctx.font="bold 22px Arial";ctx.fillStyle="#FFD700";
+  ctx.fillText("HIGH SCORE: "+highScore,400,270);
+
+  // Controls grid
+  ctx.font="12px Arial";ctx.fillStyle="#888";
+  const cy=330;
+  ctx.fillText("NUMPAD",400,cy-15);
+  ctx.font="bold 13px Arial";ctx.fillStyle=CANON_RED;
+  ctx.fillText("8·2·4·6·7·9·1·3",300,cy+5);
+  ctx.fillStyle="#aaa";ctx.font="12px Arial";
+  ctx.fillText("= AIM",415,cy+5);
+
+  ctx.font="bold 13px Arial";ctx.fillStyle=CANON_RED;
+  ctx.fillText("5",260,cy+25);
+  ctx.fillStyle="#aaa";ctx.font="12px Arial";
+  ctx.fillText("= RECORD",310,cy+25);
+
+  ctx.font="bold 13px Arial";ctx.fillStyle=CANON_RED;
+  ctx.fillText("+/−",400,cy+25);
+  ctx.fillStyle="#aaa";ctx.font="12px Arial";
+  ctx.fillText("or",430,cy+25);
+  ctx.fillStyle=CANON_RED;ctx.font="bold 13px Arial";
+  ctx.fillText("T/W",460,cy+25);
+  ctx.fillStyle="#aaa";ctx.font="12px Arial";
+  ctx.fillText("= ZOOM",505,cy+25);
+
+  ctx.font="bold 13px Arial";ctx.fillStyle=CANON_RED;
+  ctx.fillText("0",340,cy+45);
+  ctx.fillStyle="#aaa";ctx.font="12px Arial";
+  ctx.fillText("= REWIND TAPE",410,cy+45);
+
+  if(blinkOn){
+    ctx.font="bold 20px Arial";ctx.fillStyle="#FFD700";
+    ctx.fillText("PRESS NUMPAD 5 (REC) TO START",400,430);
+  }
+
+  // Ghost type legend
+  ctx.textAlign="left";
+  ctx.font="10px Arial";ctx.fillStyle="#666";
+  ctx.fillText("GHOST RARITY:",200,475);
+  const labels=[
+    {t:"Common",c:"#ccc"},{t:"Uncommon",c:"#4fc3f7"},{t:"Rare",c:"#ffd740"},{t:"Legendary",c:"#ff1744"}
+  ];
+  let lx=300;
+  for(const l of labels){
+    ctx.fillStyle=l.c;ctx.font="bold 10px Arial";
+    ctx.fillText(l.t,lx,475);
+    lx+=ctx.measureText(l.t).width+14;
+  }
+
+  ctx.font="11px Arial";ctx.fillStyle="rgba(255,255,255,0.7)";
+  ctx.fillText("Ghost sprites by haiyoooo (itch.io/haiyoooo)",400,530);
+  ctx.fillText("Background by The Outlander (itch.io/the-outlander)",400,546);
+  ctx.fillText("Music by Megumi Ryu (itch.io/megumi-ryu)",400,562);
+}
+
+function drawGhost(g){
+  if(!g||!g.alive||game.spawnTimer>0)return;
+  const bobY=Math.sin(g.bobPhase)*6;
+  const[sx,sy]=worldToScreen(g.x,g.y+bobY);
+  const screenSize=g.size*game.zoom;
+
+  ctx.save();
+  ctx.globalAlpha=g.alpha*0.9;
+  if(g.sprite){
+    const s=screenSize*2;
+    ctx.drawImage(g.sprite,sx-s/2,sy-s/2,s,s);
+  } else {
+    const grad=ctx.createRadialGradient(sx,sy,0,sx,sy,screenSize);
+    grad.addColorStop(0,"rgba(180,255,220,0.7)");
+    grad.addColorStop(0.6,"rgba(100,200,180,0.3)");
+    grad.addColorStop(1,"rgba(60,160,140,0)");
+    ctx.fillStyle=grad;
+    ctx.beginPath();ctx.ellipse(sx,sy,screenSize,screenSize*1.3,0,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle="rgba(255,255,255,0.8)";
+    ctx.beginPath();ctx.arc(sx-screenSize*0.2,sy-screenSize*0.2,screenSize*0.12,0,Math.PI*2);ctx.fill();
+    ctx.beginPath();ctx.arc(sx+screenSize*0.2,sy-screenSize*0.2,screenSize*0.12,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle="rgba(0,0,0,0.6)";
+    ctx.beginPath();ctx.arc(sx-screenSize*0.2,sy-screenSize*0.2,screenSize*0.06,0,Math.PI*2);ctx.fill();
+    ctx.beginPath();ctx.arc(sx+screenSize*0.2,sy-screenSize*0.2,screenSize*0.06,0,Math.PI*2);ctx.fill();
+  }
+  ctx.globalAlpha=1;
+
+  // Ecto bar
+  const bw=60,bh=6,bx=sx-bw/2,by=sy-screenSize-20;
+  ctx.fillStyle="rgba(0,0,0,0.6)";ctx.fillRect(bx,by,bw,bh);
+  ctx.fillStyle=CANON_RED;ctx.fillRect(bx,by,bw*(g.ecto/100),bh);
+  ctx.strokeStyle="rgba(255,255,255,0.3)";ctx.lineWidth=1;ctx.strokeRect(bx,by,bw,bh);
+
+  // Ghost name + rarity
+  ctx.textAlign="center";ctx.textBaseline="top";
+  ctx.font="bold 10px Arial";ctx.fillStyle=g.type.color;
+  ctx.fillText(g.type.name,sx,by-14);
+  if(g.type.rarity!=="Common"){
+    ctx.font="9px Arial";
+    ctx.fillText(g.type.rarity,sx,by-3);
+  }
+
+  ctx.restore();
+}
+
+function drawCrosshair(){
+  const cx=cross.x,cy=cross.y;
+  const col=game.recording?CANON_RED:game.rewinding?"#ffab00":"#fff";
+  const r=18/game.zoom*1.5;
+  ctx.strokeStyle=col;ctx.lineWidth=2;
+  ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.stroke();
+  const arm=r*1.5;const gap=r*0.55;
+  ctx.beginPath();ctx.moveTo(cx-arm,cy);ctx.lineTo(cx-gap,cy);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(cx+gap,cy);ctx.lineTo(cx+arm,cy);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(cx,cy-arm);ctx.lineTo(cx,cy-gap);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(cx,cy+gap);ctx.lineTo(cx,cy+arm);ctx.stroke();
+  ctx.fillStyle=col;
+  ctx.beginPath();ctx.arc(cx,cy,2,0,Math.PI*2);ctx.fill();
+
+  // Zoom ring ticks
+  if(game.zoom>1){
+    ctx.strokeStyle="rgba(255,255,255,0.15)";ctx.lineWidth=1;
+    ctx.beginPath();ctx.arc(cx,cy,r+6,0,Math.PI*2);ctx.stroke();
+  }
+}
+
+function drawHUD(){
+  ctx.textAlign="left";ctx.textBaseline="top";
+
+  // Canon branding
+  ctx.font="bold 20px Arial";ctx.fillStyle=CANON_RED;
+  ctx.fillText("Canon",15,12);
+  ctx.font="12px Arial";ctx.fillStyle="#fff";
+  ctx.fillText("SPECTRAL LENS",15,35);
+
+  // Battery
+  const bx=155,by=14,bw=130,bh=16;
+  ctx.font="bold 11px Arial";ctx.fillStyle="#aaa";
+  ctx.fillText("BATT",bx,by-1);
+  const bbx=bx+38;
+  ctx.fillStyle="rgba(0,0,0,0.5)";ctx.fillRect(bbx,by,bw,bh);
+  ctx.fillStyle=game.battery>25?"#00cc44":CANON_RED;
+  ctx.fillRect(bbx,by,bw*(game.battery/100),bh);
+  ctx.strokeStyle="rgba(255,255,255,0.3)";ctx.lineWidth=1;ctx.strokeRect(bbx,by,bw,bh);
+  ctx.fillStyle="#fff";ctx.font="bold 10px Arial";
+  ctx.fillText(Math.ceil(game.battery)+"%",bbx+bw/2-12,by+3);
+
+  // Tape
+  const mins=Math.floor(game.tape/60);
+  const secs=Math.floor(game.tape%60);
+  ctx.fillStyle="#888";ctx.font="bold 10px Arial";
+  ctx.fillText("DV",340,16);
+  ctx.fillStyle=game.tape<10?"#ff6666":"#ccc";
+  ctx.font="bold 13px Arial";
+  ctx.fillText("TAPE "+String(mins).padStart(2,"0")+":"+String(secs).padStart(2,"0"),360,15);
+
+  // Zoom indicator (right of tape)
+  ctx.font="bold 12px Arial";
+  const zLabel=game.zoom<=1?"W":"T";
+  ctx.fillStyle=game.zoom>1?"#ffab00":"#888";
+  ctx.fillText(zLabel+" "+game.zoom.toFixed(1)+"x",480,16);
+
+  // REC / REW indicator
+  if(game.recording){
+    ctx.fillStyle=CANON_RED;
+    ctx.beginPath();ctx.arc(W-80,24,6,0,Math.PI*2);ctx.fill();
+    ctx.font="bold 14px Arial";ctx.fillStyle=CANON_RED;ctx.textAlign="left";
+    ctx.fillText("REC",W-68,18);
+  } else if(game.rewinding){
+    ctx.font="bold 14px Arial";ctx.fillStyle="#ffab00";ctx.textAlign="left";
+    ctx.fillText("◄◄ REW",W-90,18);
+  }
+
+  // Sanity bar
+  const sx=15,sy=H-30,sw=130,sh=16;
+  ctx.font="bold 11px Arial";ctx.fillStyle="#aaa";ctx.textAlign="left";
+  ctx.fillText("SANITY",sx,sy-14);
+  ctx.fillStyle="rgba(0,0,0,0.5)";ctx.fillRect(sx,sy,sw,sh);
+  ctx.fillStyle=game.sanity>30?"#9933ff":CANON_RED;
+  ctx.fillRect(sx,sy,sw*(game.sanity/100),sh);
+  ctx.strokeStyle="rgba(255,255,255,0.3)";ctx.lineWidth=1;ctx.strokeRect(sx,sy,sw,sh);
+  ctx.fillStyle="#fff";ctx.font="bold 10px Arial";
+  ctx.fillText(Math.ceil(game.sanity)+"%",sx+sw/2-12,sy+3);
+
+  // Score + ghosts captured
+  ctx.textAlign="right";ctx.font="bold 22px Arial";ctx.fillStyle="#fff";
+  ctx.fillText("SCORE: "+game.score,W-15,H-18);
+  ctx.font="11px Arial";ctx.fillStyle="#888";
+  ctx.fillText("GHOSTS: "+game.ghostsCapt,W-15,H-38);
+}
+
+function drawVignette(){
+  const rad=game.zoom>1?W*(0.35/game.zoom):W*0.25;
+  const grad=ctx.createRadialGradient(W/2,H/2,rad,W/2,H/2,W*0.7);
+  grad.addColorStop(0,"rgba(0,0,0,0)");
+  grad.addColorStop(1,"rgba(0,0,0,"+(0.55+game.zoom*0.05)+")");
+  ctx.fillStyle=grad;ctx.fillRect(0,0,W,H);
+}
+
+function drawScanlines(){
+  ctx.fillStyle="rgba(0,0,0,0.06)";
+  for(let y=0;y<H;y+=3)ctx.fillRect(0,y,W,1);
+  for(const nl of game.noiseLines){
+    ctx.fillStyle="rgba(255,255,255,"+nl.a+")";
+    ctx.fillRect(0,nl.y,W,nl.h);
+  }
+}
+
+function drawRecBorder(){
+  if(game.recording){
+    ctx.strokeStyle=CANON_RED;ctx.lineWidth=4;ctx.strokeRect(2,2,W-4,H-4);
+  } else if(game.rewinding){
+    ctx.strokeStyle="#ffab00";ctx.lineWidth=2;ctx.strokeRect(2,2,W-4,H-4);
+  }
+}
+
+function drawGameOver(){
+  ctx.fillStyle="rgba(0,0,0,0.75)";ctx.fillRect(0,0,W,H);
+  ctx.textAlign="center";ctx.textBaseline="middle";
+  ctx.font="bold 48px Arial";ctx.fillStyle=CANON_RED;
+  ctx.fillText("GAME OVER",400,180);
+  ctx.font="20px Arial";ctx.fillStyle="#ccc";
+  ctx.fillText(game.overReason,400,235);
+  ctx.font="bold 28px Arial";ctx.fillStyle="#fff";
+  ctx.fillText("SCORE: "+game.score,400,290);
+  ctx.font="16px Arial";ctx.fillStyle="#aaa";
+  ctx.fillText("Ghosts captured: "+game.ghostsCapt,400,330);
+  if(game.newHigh){
+    ctx.font="bold 24px Arial";ctx.fillStyle=CANON_RED;
+    ctx.fillText("NEW HIGH SCORE!",400,375);
+  }
+  ctx.font="16px Arial";ctx.fillStyle="#888";
+  ctx.fillText("Press F5 to restart",400,430);
+}
+
+// ── Zoomed BG ──
+function drawZoomedScene(){
+  ctx.save();
+  ctx.translate(W/2,H/2);
+  ctx.scale(game.zoom,game.zoom);
+  ctx.translate(-W/2,-H/2);
+  drawBG();
+  ctx.restore();
+}
+
+// ── Main Loop ──
+let lastTime=0;
+function loop(ts){
+  const dt=Math.min((ts-lastTime)/1000,0.1);
+  lastTime=ts;
+  update(dt);
+  ctx.clearRect(0,0,W,H);
+
+  if(state==="title"){
+    drawTitleScreen();
+  } else {
+    drawZoomedScene();
+    drawGhost(game.ghost);
+    drawCrosshair();
+    drawVignette();
+    drawScanlines();
+    drawRecBorder();
+    drawHUD();
+    if(game.over)drawGameOver();
+  }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(ts=>{lastTime=ts;loop(ts);});
+})();
+</script>
 </body>
 </html>
